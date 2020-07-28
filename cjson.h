@@ -17,13 +17,14 @@ enum {
 };
 
 struct cjson {
-	struct cjson *parent, *next;
-	char *key;
+	struct cjson *parent;
 	union {
-		uint32_t type;
-		uint32_t count; /**< children count */
+		struct cjson *next;
+		struct cjson_mempool *mem;
 	};
-	uint32_t unused;
+	char *key;
+	uint32_t type;
+	uint32_t count; /**< children count */
 	union {
 		char *s;
 		int64_t i;
@@ -33,6 +34,7 @@ struct cjson {
 };
 
 struct cjson_mempool {
+	struct cjson_mempool *next;
 	unsigned count;
 	unsigned capacity;
 	struct cjson obj[0];
@@ -48,7 +50,7 @@ new_obj(struct cjson_mempool **mem_p)
 		return &mem->obj[mem->count++];
 	}
 
-	mem = *mem_p = calloc(1, sizeof(*mem) + num_items * sizeof(struct cjson));
+	mem = calloc(1, sizeof(*mem) + num_items * sizeof(struct cjson));
 	if (!mem) {
 		assert(false);
 		return NULL;
@@ -56,7 +58,24 @@ new_obj(struct cjson_mempool **mem_p)
 
 	mem->capacity = num_items;
 	mem->count = 1;
+
+	(*mem_p)->next = mem;
+	*mem_p = mem;
 	return &mem->obj[0];
+}
+
+void
+cjson_free(struct cjson *json)
+{
+	struct cjson_mempool *mem = json->mem;
+
+	while (mem) {
+		struct cjson_mempool *next = mem;
+
+		next = mem->next;
+		free(mem);
+		mem = next;
+	}
 }
 
 static int
@@ -64,7 +83,7 @@ add_child(struct cjson *parent, struct cjson *child)
 {
 	struct cjson *last = parent->a;
 
-	if (!parent || parent->type != CJSON_TYPE_OBJECT) {
+	if (!parent || (parent->type != CJSON_TYPE_OBJECT && parent->type != CJSON_TYPE_ARRAY)) {
 		assert(false);
 		return -EINVAL;
 	}
@@ -80,6 +99,7 @@ add_child(struct cjson *parent, struct cjson *child)
 	last->next = child;
 	assert(child->next == NULL);
 	child->next = NULL;
+	parent->count++;
 	return 0;
 }
 
@@ -87,19 +107,18 @@ struct cjson *
 cjson_parse(char *str)
 {
 	struct cjson_mempool *mem;
-	struct cjson_mempool *topmem;
 	struct cjson *top_obj; 
 	struct cjson *cur_obj;
 	char *cur_key = NULL;
 	char *b = str;
 	bool need_comma = false;
 
-	if (*b++ != '{') {
+	if (*b != '{' && *b != '[') {
 		assert(false);
 		return NULL;
 	}
 
-	topmem = mem = calloc(1, sizeof(*mem) + CJSON_MIN_POOLSIZE * sizeof(struct cjson));
+	mem = calloc(1, sizeof(*mem) + CJSON_MIN_POOLSIZE * sizeof(struct cjson));
 	if (!mem) {
 		assert(false);
 		return NULL;
@@ -109,37 +128,47 @@ cjson_parse(char *str)
 	top_obj = cur_obj = new_obj(&mem);
 	cur_obj->parent = NULL;
 	cur_obj->key = "";
-	cur_obj->type = CJSON_TYPE_OBJECT;
+	cur_obj->type = *b == '{' ? CJSON_TYPE_OBJECT : CJSON_TYPE_ARRAY;
+	cur_obj->mem = mem;
+
+	/* we handled the root object/array separately, go on */
+	b++;
 
 	while (*b) {
 		switch(*b) {
+			case '[':
 			case '{': {
 				struct cjson *obj;
-				if (!cur_key) {
+
+				need_comma = false;
+				if (!cur_key && cur_obj->type != CJSON_TYPE_ARRAY) {
 					assert(false);
-					return NULL;
+					goto err;
 				}
 
 				obj = new_obj(&mem);
 				if (!obj) {
 					assert(false);
-					return false;
+					goto err;
 				}
 				obj->parent = cur_obj;
 				obj->key = cur_key;
-				obj->type = CJSON_TYPE_OBJECT;
+				obj->type = *b == '{' ? CJSON_TYPE_OBJECT : CJSON_TYPE_ARRAY;
 				if (add_child(cur_obj, obj) != 0) {
 					assert(false);
-					return false;
+					goto err;
 				}
 				cur_obj = obj;
+				cur_key = NULL;
 				break;
 			}
+			case ']':
 			case '}': {
-				need_comma = false; 
-				if (cur_key) {
+				need_comma = true;
+				if (cur_key || (*b == ']' && cur_obj->type == CJSON_TYPE_OBJECT) ||
+				    (*b == '}' && cur_obj->type == CJSON_TYPE_ARRAY)) {
 					assert(false);
-					return NULL;
+					goto err;
 				}
 
 				cur_obj = cur_obj->parent;
@@ -152,17 +181,17 @@ cjson_parse(char *str)
 				char *start = ++b;
 
 				while (*b && *b != '"') b++;
-				if (*b == 0 || *(b + 1) == NULL) {
-					return NULL;
+				if (*b == 0 || *(b + 1) == 0) {
+					goto err;
 				}
 				*b++ = 0;
 
-				if (cur_key) {
+				if (cur_key || cur_obj->type == CJSON_TYPE_ARRAY) {
 					struct cjson *obj = new_obj(&mem);
 
 					if (!obj) {
 						assert(false);
-						return false;
+						goto err;
 					}
 					obj->parent = cur_obj;
 					obj->key = cur_key;
@@ -170,15 +199,20 @@ cjson_parse(char *str)
 					obj->s = start;
 					if (add_child(cur_obj, obj) != 0) {
 						assert(false);
-						return NULL;
+						goto err;
 					}
 
 					cur_key = NULL;
 					need_comma = true;
 				} else {
+					if (need_comma) {
+						assert(false);
+						goto err;
+					}
+
 					if (cur_obj->type != CJSON_TYPE_OBJECT) {
 						assert(false);
-						return NULL;
+						goto err;
 					}
 
 					cur_key = start;
@@ -201,16 +235,16 @@ cjson_parse(char *str)
 				struct cjson *obj;
 				char *end;
 
-				if (!cur_key) {
+				if (!cur_key && cur_obj->type != CJSON_TYPE_ARRAY) {
 					assert(false);
-					return NULL;
+					goto err;
 				}
 
 
 				obj = new_obj(&mem);
 				if (!obj) {
 					assert(false);
-					return NULL;
+					goto err;
 				}
 				obj->parent = cur_obj;
 				obj->key = cur_key;
@@ -219,14 +253,14 @@ cjson_parse(char *str)
 				obj->i = strtoll(b, &end, 0);
 				if (end == b || errno == ERANGE) {
 					assert(false);
-					return NULL;
+					goto err;
 				}
 
 				if (*end == '.' || *end == 'e' || *end == 'E') {
 					obj->d = strtod(b, &end);
 					if (end == b || errno == ERANGE) {
 						assert(false);
-						return NULL;
+						goto err;
 					}
 					obj->type = CJSON_TYPE_FLOAT;
 				} else {
@@ -235,7 +269,7 @@ cjson_parse(char *str)
 
 				if (add_child(cur_obj, obj) != 0) {
 					assert(false);
-					return false;
+					goto err;
 				}
 
 				b = end - 1; /* will be incremented */
@@ -254,13 +288,35 @@ cjson_parse(char *str)
 	}
 
 	return top_obj;
-	
+err:
+	cjson_free(top_obj);
+	return NULL;
 }
 
 struct cjson *
 cjson_obj(struct cjson *json, const char *key)
 {
 	struct cjson *entry = json->a;
+
+	if (json->type == CJSON_TYPE_ARRAY) {
+		char *end;
+		uint64_t i;
+
+		errno = 0;
+		i = strtoll(key, &end, 0);
+		if (end == key || errno == ERANGE) {
+			return NULL;
+		}
+
+		while (entry) {
+			if (i-- == 0) {
+				return entry;
+			}
+			entry = entry->next;
+		}
+
+		return NULL;
+	}
 
 	while (entry) {
 		if (strcmp(entry->key, key) == 0) {
