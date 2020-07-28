@@ -1,6 +1,7 @@
+#include <string.h>
 #include <assert.h>
 
-#include "cjson.h"
+#include "cjson_ext.h"
 
 int
 main(void)
@@ -31,6 +32,15 @@ main(void)
 		assert(nested->type == CJSON_TYPE_OBJECT);
 		assert(strcmp(cjson_obj(nested, "nestedkey")->s, "nestedval") == 0);
 		assert(cjson_obj(nested, "invalid")->type == CJSON_TYPE_NONE);
+		cjson_free(json);
+	}
+
+	{
+		char buf[] = "{\"key\":{\"nestedkey\":\"nestedval\"}}";
+		struct cjson *json = cjson_parse(buf);
+		assert(JS(json, "key")->type == CJSON_TYPE_OBJECT);
+		assert(strcmp(JSs(json, "key", "nestedkey"), "nestedval") == 0);
+		assert(JS(json, "invalid")->type == CJSON_TYPE_NONE);
 		cjson_free(json);
 	}
 

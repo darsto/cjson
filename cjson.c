@@ -1,9 +1,11 @@
 #include <stdlib.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <string.h>
 #include <errno.h>
 #include <assert.h> /* TODO to be removed */
-#include "cjson.h"
+
+#include "cjson_ext.h"
 
 static struct cjson g_null_json = {};
 
@@ -276,10 +278,15 @@ cjson_obj(struct cjson *json, const char *key)
 		char *end;
 		uint64_t i;
 
-		errno = 0;
-		i = strtoll(key, &end, 0);
-		if (end == key || errno == ERANGE) {
-			return &g_null_json;
+		/* this can't be an address */
+		if ((uintptr_t)key < 65536) {
+			i = (uintptr_t)key;
+		} else {
+			errno = 0;
+			i = strtoll(key, &end, 0);
+			if (end == key || errno == ERANGE) {
+				return &g_null_json;
+			}
 		}
 
 		while (entry) {
@@ -300,4 +307,23 @@ cjson_obj(struct cjson *json, const char *key)
 	}
 
 	return &g_null_json;
+}
+
+struct cjson *
+cjson_js_ext(size_t argc, ...)
+{
+	struct cjson *obj;
+	va_list ap;
+	int i;
+
+	va_start(ap, argc);
+	obj = va_arg(ap, struct cjson *);
+	for (i = 0; i < argc - 1; i++) {
+		const char *key = va_arg(ap, const char *);
+
+		obj = cjson_obj(obj, key);
+	}
+	va_end(ap);
+
+	return obj;
 }
