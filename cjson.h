@@ -9,7 +9,8 @@
 #define CJSON_MIN_POOLSIZE 8
 
 enum {
-	CJSON_TYPE_STRING = UINT32_MAX - 16,
+	CJSON_TYPE_NONE = 0,
+	CJSON_TYPE_STRING,
 	CJSON_TYPE_INTEGER,
 	CJSON_TYPE_FLOAT,
 	CJSON_TYPE_ARRAY,
@@ -32,6 +33,8 @@ struct cjson {
 		struct cjson *a;
 	};
 };
+
+static struct cjson g_null_json = {};
 
 struct cjson_mempool {
 	struct cjson_mempool *next;
@@ -305,7 +308,7 @@ cjson_obj(struct cjson *json, const char *key)
 		errno = 0;
 		i = strtoll(key, &end, 0);
 		if (end == key || errno == ERANGE) {
-			return NULL;
+			return &g_null_json;
 		}
 
 		while (entry) {
@@ -315,7 +318,7 @@ cjson_obj(struct cjson *json, const char *key)
 			entry = entry->next;
 		}
 
-		return NULL;
+		return &g_null_json;
 	}
 
 	while (entry) {
@@ -325,5 +328,5 @@ cjson_obj(struct cjson *json, const char *key)
 		entry = entry->next;
 	}
 
-	return NULL;
+	return &g_null_json;
 }
